@@ -1,0 +1,115 @@
+# syntax=docker/dockerfile:1.27.0@sha256:bde3983e9c939224420ddaf6b784cc30e09b035a4dea01f581230c50809f372e
+# check=error=true
+
+ARG BASE_IMAGE=alpine:3.24
+
+FROM ${BASE_IMAGE} AS build
+SHELL ["/bin/ash", "-euo", "pipefail", "-c"]
+RUN find /lib /usr/lib -maxdepth 1 -name '*.so*' | sed 's,.*/,,' | LC_ALL=C sort -u > /tmp/base-sonames; \
+    apk add --no-cache \
+      bison \
+      build-base \
+      cmake \
+      curl \
+      flex \
+      python3 \
+      samurai
+
+ARG VERSION
+ARG SOURCE_SHA256
+RUN printf '%s\n' "${VERSION}" | grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+' \
+      || { echo "unexpected VERSION: ${VERSION}" >&2; exit 1; }; \
+    printf '%s\n' "${SOURCE_SHA256}" | grep -Eqx '[0-9a-f]{64}' \
+      || { echo "SOURCE_SHA256 must be the tarball's sha256" >&2; exit 1; }; \
+    tag="Release_$(printf '%s' "${VERSION}" | tr . _)"; \
+    url="https://github.com/doxygen/doxygen/releases/download/${tag}/doxygen-${VERSION}.src.tar.gz"; \
+    curl -fsSL --proto '=https' --proto-redir '=https' --retry 3 -o /tmp/doxygen.tar.gz "$url"; \
+    echo "${SOURCE_SHA256}  /tmp/doxygen.tar.gz" | sha256sum -c -; \
+    mkdir /src; \
+    tar -xzf /tmp/doxygen.tar.gz -C /src --strip-components=1; \
+    rm /tmp/doxygen.tar.gz; \
+    echo "$url" > /tmp/source-url
+
+# fmt, spdlog and SQLite are the copies bundled with doxygen, as in upstream's
+# own builds, and Release (upstream's build type) turns on link-time
+# optimization. The GUI (doxywizard), the search tools and libclang parsing
+# are left out. iconv is the one built into musl.
+# musl gives new threads a 128 KiB stack unless the executable asks for more,
+# and doxygen parses and writes output on worker threads when NUM_PROC_THREADS
+# is not 1, so the executable asks for 8 MiB, what glibc threads usually get.
+ARG JOBS
+WORKDIR /src
+RUN set -- \
+      -G Ninja \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_INSTALL_PREFIX=/usr/local \
+      -DCMAKE_EXE_LINKER_FLAGS=-Wl,-z,stack-size=8388608 \
+      -Dbuild_doc=OFF \
+      -Dbuild_search=OFF \
+      -Dbuild_wizard=OFF \
+      -Duse_libclang=OFF; \
+    echo "$*" > /tmp/cmake-options; \
+    cmake -S . -B build "$@"; \
+    cmake --build build -j"${JOBS:-$(nproc)}"
+
+COPY runtime-deps.alpine /tmp/runtime-deps.extra
+# doxygen embeds the HTML and LaTeX templates, which include third-party
+# scripts, a font and TeX files, and links the bundled libraries. Each keeps
+# its notice in its first comment that mentions copyright, or in the comment
+# lines at the top of the file.
+RUN DESTDIR=/out cmake --install build --strip; \
+    rm -rf /out/usr/local/share/man; \
+    test "$(/out/usr/local/bin/doxygen --version)" = "${VERSION}"; \
+    test "$(readelf -lW /out/usr/local/bin/doxygen | awk '$1 == "GNU_STACK" { print $6 }')" = 0x800000; \
+    meta=/out/usr/local/share/randomcontainers/doxygen; \
+    mkdir -p "$meta/licenses"; \
+    cp LICENSE deps/fmt/include/fmt/fmt.license.rst templates/html/MaterialSymbolsOutlined_LICENSE.txt "$meta/licenses/"; \
+    cp deps/spdlog/LICENSE "$meta/licenses/LICENSE.spdlog"; \
+    for f in deps/TinyDeflate/gunzip.hh deps/libmd5/md5.c deps/liblodepng/lodepng.cpp \
+             deps/libmscgen/gd.h deps/libmscgen/mscgen_adraw.c deps/sqlite3/sqlite3.c \
+             deps/svg/svg-*.js deps/svg/svgpan-*.js \
+             templates/html/clipboard.js templates/html/dynsections.js; do \
+      awk '/\/\*/ { c = 1; b = "" } c { b = b $0 "\n" } c && /\*\// { c = 0; if (tolower(b) ~ /copyright/) { printf "%s", b; exit } }' \
+        "$f" > "$meta/licenses/COPYING.${f##*/}"; \
+      test -s "$meta/licenses/COPYING.${f##*/}"; \
+    done; \
+    for spec in '^// deps/filesystem/filesystem.hpp' '^%% templates/latex/etoc_doxygen.sty' \
+                '^# templates/html/bib2xhtml.pl' '^[[:space:]]*% templates/html/doxygen.bst'; do \
+      f="${spec#* }"; \
+      awk -v re="${spec%% *}" '$0 !~ re { exit } { print }' "$f" > "$meta/licenses/COPYING.${f##*/}"; \
+      test -s "$meta/licenses/COPYING.${f##*/}"; \
+    done; \
+    echo "${VERSION}" > "$meta/version"; \
+    cp /tmp/source-url "$meta/source"; \
+    { \
+      echo "source-sha256=${SOURCE_SHA256}"; \
+      echo "cmake=$(cat /tmp/cmake-options)"; \
+      echo "compiler=$(c++ --version | sed -n 1p)"; \
+      echo "sqlite=$(sed -n 's/^#define SQLITE_VERSION  *"\(.*\)"$/\1/p' deps/sqlite3/sqlite3.h)"; \
+    } > "$meta/buildinfo"; \
+    export LC_ALL=C; \
+    find /out/usr/local -type f | while read -r f; do \
+      if readelf -h "$f" > /dev/null 2>&1; then \
+        readelf -d "$f" | sed -n 's/.*(NEEDED).*\[\(.*\)\]$/\1/p'; \
+      fi; \
+    done | sort -u | while read -r so; do \
+      if [ -n "$(find /out/usr/local -name "$so")" ]; then continue; fi; \
+      if grep -qxF "$so" /tmp/base-sonames; then continue; fi; \
+      echo "so:$so"; \
+    done > /tmp/runtime-deps.elf; \
+    test -s /tmp/runtime-deps.elf; \
+    cat /tmp/runtime-deps.elf /tmp/runtime-deps.extra | sort -u > "$meta/runtime-deps"
+
+FROM ${BASE_IMAGE} AS slim
+RUN --mount=type=bind,from=build,source=/out/usr/local/share/randomcontainers/doxygen/runtime-deps,target=/tmp/runtime-deps \
+    set -eu; \
+    xargs apk add --no-cache ca-certificates tini < /tmp/runtime-deps; \
+    addgroup -g 1000 app; \
+    adduser -D -u 1000 -G app app; \
+    install -d -m 1777 /work /cache
+COPY --link --from=build /out/usr/local/ /usr/local/
+ENV LANG=C.UTF-8 XDG_CACHE_HOME=/cache
+WORKDIR /work
+USER 1000:1000
+ENTRYPOINT ["tini", "--", "doxygen"]
+CMD ["--help"]
