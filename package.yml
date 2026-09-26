@@ -1,0 +1,173 @@
+name: doxygen
+title: Doxygen
+summary: Generates HTML, LaTeX, man page and XML documentation from comments in C++, C, Java, Python and other source code.
+homepage: https://www.doxygen.nl/
+license: GPL-2.0-or-later AND Apache-2.0 AND BSD-2-Clause-Views AND LPPL-1.3c AND MIT AND Zlib AND blessing
+source-release: true
+upstream:
+  source: github-release
+  repository: doxygen/doxygen
+  # Release tags look like Release_1_18_0 for 1.18.0.
+  tag-pattern: '^Release_(\d+)_(\d+)_(\d+)$'
+  version-template: '{1}.{2}.{3}'
+  versioning: semver
+  version: 1.18.0
+  artifact:
+    url: https://github.com/doxygen/doxygen/releases/download/Release_{underscored}/doxygen-{version}.src.tar.gz
+    sha256: a1deed70a6785bbec95a2b2a9e419dc7f7b223a9d74a8644ae611c8e2dcdd354
+image:
+  entrypoint: [doxygen]
+  cmd: [--help]
+test:
+  - |
+    test "$(doxygen --version)" = "$VERSION"
+    doxygen -V > version.txt
+    grep -Eq '^ +with sqlite3 [0-9]+\.[0-9]+\.[0-9]+\.$' version.txt
+    doxygen -s -g template.cfg > /dev/null
+    grep -Eq '^PROJECT_NAME +=' template.cfg
+  - |
+    mkdir -p shapes/src
+    cat > shapes/src/shapes.h <<'EOF'
+    /** @file shapes.h
+     *  @brief Shapes with an area.
+     */
+
+    /** A shape with an area. */
+    class Shape {
+    public:
+      /** Destroys the shape. */
+      virtual ~Shape();
+      /** Returns the area of the shape. */
+      virtual double area() const = 0;
+    };
+
+    /** A square with sides of equal length.
+     *
+     *  \msc
+     *    caller, square;
+     *    caller => square [label="area()"];
+     *    caller << square [label="result"];
+     *  \endmsc
+     */
+    class Square : public Shape {
+    public:
+      /** Returns the area of the square. */
+      double area() const override;
+    private:
+      double side_; ///< The length of one side.
+    };
+    EOF
+    # A Latin-1 file, converted to UTF-8 through iconv.
+    printf '/** @file latin1.h\n *  @brief Caf\351 au lait.\n */\n' > shapes/src/latin1.h
+    # With two threads, doxygen parses the input and writes the output on worker threads.
+    cat > shapes/Doxyfile <<'EOF'
+    PROJECT_NAME     = Shapes
+    NUM_PROC_THREADS = 2
+    INPUT            = shapes/src
+    INPUT_ENCODING   = ISO-8859-1
+    OUTPUT_DIRECTORY = shapes/out
+    CASE_SENSE_NAMES = YES
+    GENERATE_XML     = YES
+    GENERATE_MAN     = YES
+    GENERATE_SQLITE3 = YES
+    USE_PDFLATEX     = NO
+    QUIET            = YES
+    WARN_LOGFILE     = shapes/warnings.log
+    EOF
+    doxygen shapes/Doxyfile
+    if [ -s shapes/warnings.log ]; then cat shapes/warnings.log >&2; exit 1; fi
+    out=shapes/out
+    grep -Fq 'Returns the area of the square.' "$out/html/classSquare.html"
+    grep -Fq "Caf$(printf '\303\251') au lait." "$out/html/latin1_8h.html"
+    # Without Graphviz, doxygen draws class diagrams and message sequence charts itself.
+    is_png() { test "$(head -c 4 "$1" | tail -c 3)" = PNG; }
+    is_png "$out/html/classSquare.png"
+    is_png "$(find "$out/html" -name '*_mscgraph_*.png')"
+    grep -Fq '<compoundname>Square</compoundname>' "$out/xml/classSquare.xml"
+    grep -Fq '>Shape</basecompoundref>' "$out/xml/classSquare.xml"
+    grep -Fq '.TH "Square" 3' "$out/man/man3/Square.3"
+    grep -Fq 'Returns the area of the square' "$out/man/man3/Square.3"
+    test "$(head -c 15 "$out/sqlite3/doxygen_sqlite3.db")" = 'SQLite format 3'
+    grep -Fq '\begin{document}' "$out/latex/refman.tex"
+    head -n 1 "$out/latex/classSquare.eps" | grep -q '^%!PS-Adobe'
+  - |
+    # The configuration can also come from standard input.
+    mkdir -p stdin/src
+    printf '%s\n' '/** @file api.h' ' *  @brief The public API.' ' */' '' '/** Adds two numbers. */' 'int add(int a, int b);' > stdin/src/api.h
+    printf '%s\n' 'INPUT = stdin/src' 'OUTPUT_DIRECTORY = stdin/out' 'GENERATE_LATEX = NO' 'WARN_LOGFILE = stdin/warnings.log' \
+      | doxygen -q -
+    if [ -s stdin/warnings.log ]; then cat stdin/warnings.log >&2; exit 1; fi
+    grep -Fq 'Adds two numbers.' stdin/out/html/api_8h.html
+examples:
+  - title: Generate documentation with the Doxyfile in the current directory
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" ghcr.io/randomcontainers/doxygen Doxyfile
+  - title: Write a template Doxyfile to start from
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" ghcr.io/randomcontainers/doxygen -g Doxyfile
+  - title: Override a setting of the Doxyfile without editing it
+    command: '{ cat Doxyfile; echo "PROJECT_NUMBER = 2.1"; } | docker run --rm -i --user "$(id -u):$(id -g)" -v "$PWD:/work" ghcr.io/randomcontainers/doxygen -'
+combos:
+  - with: [graphviz]
+    default: true
+    base: graphviz
+    summary: Doxygen with Graphviz, for class, collaboration, include and call graphs drawn by dot.
+    test:
+      - |
+        # With HAVE_DOT, doxygen runs dot from Graphviz for its graphs, in each image format.
+        command -v dot
+        mkdir src
+        cat > src/shapes.h <<'EOF'
+        /** @file shapes.h
+         *  @brief Shapes with an area.
+         */
+
+        /** A shape with an area. */
+        class Shape {
+        public:
+          /** Destroys the shape. */
+          virtual ~Shape();
+          /** Returns the area of the shape. */
+          virtual double area() const = 0;
+        };
+
+        /** A square with sides of equal length. */
+        class Square : public Shape {
+        public:
+          /** Returns the area of the square. */
+          double area() const override;
+        };
+        EOF
+        cat > src/shapes.cpp <<'EOF'
+        /** @file shapes.cpp
+         *  @brief Functions on shapes.
+         */
+        #include "shapes.h"
+
+        /** Returns the area of one shape. */
+        double area_of(const Shape &shape)
+        {
+          return shape.area();
+        }
+
+        /** Returns the area of two shapes together. */
+        double total_area(const Shape &first, const Shape &second)
+        {
+          return area_of(first) + area_of(second);
+        }
+        EOF
+        for format in svg png; do
+          printf '%s\n' 'INPUT = src' "OUTPUT_DIRECTORY = $format" 'CASE_SENSE_NAMES = YES' 'GENERATE_LATEX = NO' \
+            'HAVE_DOT = YES' 'CALL_GRAPH = YES' "DOT_IMAGE_FORMAT = $format" "WARN_LOGFILE = warnings-$format.log" \
+            'QUIET = YES' > "Doxyfile-$format"
+          doxygen "Doxyfile-$format"
+          if [ -s "warnings-$format.log" ]; then cat "warnings-$format.log" >&2; exit 1; fi
+        done
+        inherit="$(find svg/html -name 'classSquare*inherit*graph.svg')"
+        grep -q '<svg' "$inherit"
+        grep -q '>Shape</text>' "$inherit"
+        grep -q '>area_of</text>' svg/html/*_cgraph.svg
+        grep -q '>shapes.h</text>' svg/html/*_incl.svg
+        is_png() { test "$(head -c 4 "$1" | tail -c 3)" = PNG; }
+        is_png "$(find png/html -name 'classSquare*inherit*graph.png')"
+        for f in png/html/*_cgraph.png png/html/*_incl.png; do
+          is_png "$f"
+        done
