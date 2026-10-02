@@ -12,8 +12,6 @@ Generate the documentation that the `Doxyfile` in the current directory describe
 docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" ghcr.io/randomcontainers/doxygen Doxyfile
 ```
 
-The same images can also be pulled as `randomcontainers.com/doxygen`.
-
 The entrypoint runs `doxygen` under `tini` in `/work`, and without arguments it prints Doxygen's help. Paths in the Doxyfile, such as `INPUT` and `OUTPUT_DIRECTORY`, are relative to `/work`, the directory you mount.
 
 Write a template Doxyfile to start a new project from:
