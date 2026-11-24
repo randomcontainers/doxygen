@@ -112,7 +112,16 @@ gh attestation verify oci://ghcr.io/randomcontainers/doxygen:latest \
   --repo randomcontainers/doxygen --signer-repo randomcontainers/ci
 ```
 
-Images from `ghcr.io/randomcontainers/doxygen-graphviz` are built in that repository, so verify them with `--repo randomcontainers/doxygen-graphviz` and the same `--signer-repo`.
+Images published since November 2026 also have a keyless cosign signature from the same workflow, for admission controllers that check cosign signatures. Tags last built before then have only the attestation.
+
+```sh
+cosign verify ghcr.io/randomcontainers/doxygen:latest \
+  --certificate-identity https://github.com/randomcontainers/ci/.github/workflows/build.yml@refs/tags/v1 \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-github-workflow-repository randomcontainers/doxygen
+```
+
+Images from `ghcr.io/randomcontainers/doxygen-graphviz` are built in [randomcontainers/doxygen-graphviz](https://github.com/randomcontainers/doxygen-graphviz), so use `randomcontainers/doxygen-graphviz` in `--repo` and `--certificate-github-workflow-repository`.
 
 Each platform image also carries an SPDX SBOM that lists every distro package with its version:
 
